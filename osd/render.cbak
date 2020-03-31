@@ -1,0 +1,574 @@
+#include <stdint.h>
+#include <stdio.h>
+#include <unistd.h>
+#include "render.h"
+#include "p2v.h"
+#include "typedef.h"
+#include <math.h>
+#include <sys/time.h>
+#include <stdlib.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <string.h>
+#include <sys/time.h>   //      gettimeofday
+#include <sys/stat.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/mman.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <errno.h>
+#include "Util.h"
+
+
+
+#define TO_FEET 3.28084
+#define TO_MPH  0.621371
+#define CELL_WARNING_PCT1 (CELL_WARNING1-CELL_MIN)/(CELL_MAX-CELL_MIN)*100
+#define CELL_WARNING_PCT2 (CELL_WARNING2-CELL_MIN)/(CELL_MAX-CELL_MIN)*100
+
+
+#define true  1
+#define false 0
+
+
+extern int socket_descriptor;
+extern struct sockaddr_in address;
+#define ROW  7
+uint32_t *fb_base0;
+uint32_t *fb_base1;
+uint32_t *fb_ctrl;
+uint32_t *working_fb;
+
+struct decoce_param param;
+int fd_param;
+int *buffer_param;
+
+int fd_video;
+int *buffer_video;
+int value_param[3];
+int *lcdwh;
+int flag_lcdwh=0;
+static unsigned int count_anjian1=1;
+static unsigned int count_anjian2=0;
+static unsigned int count_anjian3=0;
+static unsigned int count_anjian4=0;
+static unsigned int count_anjian5=0;
+static unsigned int count_anjian6=0;
+static unsigned int count_anjian7=0;
+static unsigned int count_osd=0;
+
+
+#define RED     (0xFFFF0000)
+#define BLUE    (0xFF0000FF)
+#define GREEN   (0xFF00FF00)
+#define YELLOW  (0xFFFFFF00)
+#define BLACK   (0xFF000000)
+#define WHITE   (0xFFFFFFFF)
+
+int x_res = 1920;
+int y_res = 1080;
+
+extern void LCDDisplayASCII8X16_720p(u32 x0, u32 y0, u32 ForeColor, char * s);
+extern void LCDDisplayASCII8X16(u32 x0, u32 y0, u32 ForeColor, char * s);
+extern u32 g_pLCDBuffer;
+extern u32 g_dwLcdWidth;
+extern u32 g_dwLcdHeight;
+
+
+
+int *lcdwh_memory_open(void) {
+        char buf[128];
+        int fd;
+        sprintf(buf, "/lcdwidth_height");
+        fd = shm_open(buf, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
+        if(fd < 0) { perror("shm_open"); exit(1); }
+        if (ftruncate(fd, 4096) == -1) { perror("ftruncate"); exit(1); }
+        int *retval = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        return retval;
+}
+
+
+void SetPixelOS(int16_t x, int16_t y, uint32_t color) //set pixel off screen
+{
+  working_fb[y * x_res + x] = color;
+}
+
+
+int get_parameter(struct decoce_param *pparam)
+{
+   if(confile_init()) {
+        printf("config file parse filed!\n");
+        return -1;
+   }
+   pparam->wififreq     = get_conf_string("wififreq", "AUTO");
+   pparam->color        = get_conf_string("color",    "YELLOW");
+   pparam->invert_poll  = get_conf_string("invert_poll","1");
+   pparam->invert_pitch = get_conf_string("invert_pitch","1");
+   pparam->txpower      = get_conf_string("txpower","10mW");  
+   pparam->osd          = get_conf_int("osd",1);  
+
+
+   return 0;
+}
+
+
+
+void DrawLineOS(int16_t x1, int16_t y1, int16_t x2, int16_t y2, uint32_t color)
+{
+  int16_t temp;
+  int dalt_x,dalt_y,err=0;
+ if (y1>y2)
+    {
+    temp=x1;
+    x1=x2;
+    x2=temp;
+    temp=y1;
+    y1=y2;
+    y2=temp;
+    }
+SetPixelOS(x1,y1,color);
+ dalt_x=x2-x1;
+ dalt_y=y2-y1;
+ if(dalt_x>=0)
+     {
+      if(dalt_y>dalt_x)//k>1
+        {
+         while(y1<y2)
+         {
+          if(err<0)
+          {
+           x1=x1+1;
+           y1=y1+1;
+           err=err+dalt_y-dalt_x;
+           }
+           else
+           {
+           y1=y1+1;
+           err=err-dalt_x;
+           }
+          SetPixelOS(x1,y1,color);
+         }
+       }
+     else  // 0<=k=<1
+      {
+       if (dalt_y==0)
+          y1=y1-1;
+       while(x1<x2)
+         {
+          if(err<0)
+          {
+           x1=x1+1;
+           err=err+dalt_y;
+           }
+           else
+           {
+           y1=y1+1;
+	        x1=x1+1;
+           err=err+dalt_y-dalt_x;
+           }
+          SetPixelOS(x1,y1,color);
+         }
+     }
+
+  }
+else
+  {
+   dalt_x=x1-x2;
+    if(dalt_y>dalt_x)//k<-1
+     {
+      while(y1<y2)
+       {
+        if(err<0)
+         {
+          x1=x1-1;
+          y1=y1+1;
+          err=err+dalt_y-dalt_x;
+         }
+        else
+         {
+          y1=y1+1;
+          err=err-dalt_x;
+         }
+        SetPixelOS(x1,y1,color);
+      }
+    }
+   else       //0>k>=-1
+    {
+      if (dalt_y==0)
+          y1=y1-1;
+    while(x1>x2)
+      {
+       if(err<0)
+        {
+         x1=x1-1;
+         err=err+dalt_y;
+        }
+       else
+        {
+         x1=x1-1;
+         y1=y1+1;
+         err=err+dalt_y-dalt_x;
+        }
+       SetPixelOS(x1,y1,color);
+      }
+    }
+  }
+
+}
+
+void Arrow(uint16_t x0, uint16_t y0, int len){
+
+
+//      blt_clr(fb_base0,x0,y0,x0+w,y0+h);
+        DrawLineOS(x0,y0+18,x0+20,y0+18,RED);
+        DrawLineOS(x0+10,y0,x0+20,y0+18,RED);
+        DrawLineOS(x0+10,y0+36,x0+20,y0+18,RED);
+
+}
+
+
+
+
+void blt_clr(uint32_t *fb, uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
+{
+        uint32_t *src_addr;
+        int x_stride;
+        int i;
+        int iter = y1 - y0 + 1;
+
+        x_stride = (x1 - x0 + 1) * 4;
+        for(i=0; i<iter; i++) {
+                src_addr = &fb[(y0 + i)*x_res + x0];
+                memset(src_addr, 0x0, x_stride);
+        }
+}
+
+
+
+
+int width, height;
+
+float scale_factor_font;
+int setting_home;
+int home_set;
+float home_lat;
+float home_lon;
+int home_counter;
+char buffer[40];
+
+int packetslost_last[6];
+int fecs_skipped_last;
+int injection_failed_last;
+int tx_restart_count_last;
+
+
+
+int getWidth(float pos_x_percent) {
+    return (x_res * 0.01f * pos_x_percent);
+}
+
+int getHeight(float pos_y_percent) {
+    return (y_res * 0.01f * pos_y_percent);
+}
+
+float getOpacity(int r, int g, int b, float o) {
+    if (o<0.5) o = o*2;
+    return o;
+}
+
+void setfillstroke() {
+//    Fill(COLOR);
+//    Stroke(OUTLINECOLOR);
+//    StrokeWidth(OUTLINEWIDTH);
+}
+
+void render_init() {
+
+	fb_base0 = (int32_t *)p2v_memfb(0x11800000, 1920*1088*4);
+	//fb_base0 = (int32_t *)p2v(0x11800000, 1920*1088*4);
+        printf("fb_base virt 0x%08x\n", (uint32_t)fb_base0);
+
+        memset(fb_base0,0x00,1920*1088*4);
+
+        fb_base1 = (int32_t *)p2v_memfb(0x12000000, 1920*1088*4);
+        //fb_base1 = (int32_t *)p2v(0x12000000, 1920*1088*4);
+        printf("fb_base virt 0x%08x\n", (uint32_t)fb_base1);
+
+        memset(fb_base1,0x00,1920*1088*4);
+
+        fb_ctrl = (int32_t *)p2v(0x43c00000, 4096);
+	fb_ctrl[56] = 0x5;
+        g_pLCDBuffer = (u32)fb_base0;
+	working_fb = (u32)fb_base0;
+	
+	if(get_parameter(&param)) {
+              printf("player:get decode parameter failed\n");
+              return -1;
+        }
+
+
+	count_anjian1 =1;
+	count_anjian6 = 0;
+	printf("%s %s %s %s \n", param.wififreq,param.color,param.invert_poll,param.invert_pitch);
+
+
+	lcdwh = lcdwh_memory_open();	
+
+	if(lcdwh[0]==0){
+		lcdwh[0] = 1920;
+	}
+
+	if(lcdwh[0] == 1920){  //1080P
+
+		x_res = 1920;
+		y_res = 1080;
+		g_dwLcdWidth = 1920;
+		g_dwLcdHeight = 1080;		
+		blt_clr(fb_base0,20,64,60,136+36*3);
+		Arrow(20,64,1);
+		LCDDisplayASCII8X16(64,64,   RED,  "FREQ        :     ");
+		LCDDisplayASCII8X16(64+13*24,64,RED,param.wififreq);
+		LCDDisplayASCII8X16(64,64+36,RED,  "TXPOWER     :     ");
+		LCDDisplayASCII8X16(64+13*24,64+36,RED,param.txpower);
+		LCDDisplayASCII8X16(64,64+36*2,RED,"COLOR       :     ");
+		LCDDisplayASCII8X16(64+13*24,64+36*2,RED,param.color);
+		LCDDisplayASCII8X16(64,64+36*3,RED,"INVERT_ROLL :     ");
+		LCDDisplayASCII8X16(64+13*24,64+36*3,RED,param.invert_poll);
+		LCDDisplayASCII8X16(64,64+36*4,RED,"INVERT_PITCH:     ");
+		LCDDisplayASCII8X16(64+13*24,64+36*4,RED,param.invert_pitch);
+		LCDDisplayASCII8X16(64,64+36*5,RED,"OSD         :     ");
+		LCDDisplayASCII8X16(64+13*24,64+36*5,RED,(param.osd > 0)?"ON":"OFF");
+		LCDDisplayASCII8X16(64,64+36*6,RED,"SAVE        :     ");
+		LCDDisplayASCII8X16(64+13*24,64+36*6,RED,"OFF");
+
+
+	}else if(lcdwh[0] == 1280){  //720P
+		x_res = 1280;
+                y_res = 720;
+                g_dwLcdWidth = 1280;
+                g_dwLcdHeight = 720;
+		blt_clr(fb_base0,20,64,60,136+36*3);
+		Arrow(20,64,1);
+	        LCDDisplayASCII8X16_720p(64,64, RED,     "FREQ        :     ");
+		LCDDisplayASCII8X16_720p(64+13*16,64,RED,param.wififreq);
+	        LCDDisplayASCII8X16_720p(64,64+36, RED,  "TXPOWER     :     ");
+		LCDDisplayASCII8X16_720p(64+13*16,64+36,RED,param.txpower);
+                LCDDisplayASCII8X16_720p(64,64+36*2,RED, "COLOR       :     ");
+		LCDDisplayASCII8X16_720p(64+13*16,64+36*2,RED,param.color);
+                LCDDisplayASCII8X16_720p(64,64+36*3,RED, "INVERT_ROLL :     ");
+		LCDDisplayASCII8X16_720p(64+13*16,64+36*3,RED,param.invert_poll);
+                LCDDisplayASCII8X16_720p(64,64+36*4,RED, "INVERT_PITCH:     ");
+		LCDDisplayASCII8X16_720p(64+13*16,64+36*4,RED,param.invert_pitch);
+		LCDDisplayASCII8X16_720p(64,64+36*5,RED, "OSD         :     ");
+                LCDDisplayASCII8X16_720p(64+13*16,64+36*5,RED,(param.osd > 0)?"ON":"OFF");
+		LCDDisplayASCII8X16_720p(64,64+36*6,RED, "SAVE        :     ");
+                LCDDisplayASCII8X16_720p(64+13*16,64+36*6,RED,"OFF");
+	
+	}
+
+    	printf("width %d height %d\n",lcdwh[0],lcdwh[1]);	
+}
+
+
+void set_freq(int value){
+
+	int freq[10] = {0,5180,5200,5220,5240,5745,5765,5785,5805,5825};
+	char buf[20];
+	if(value == 0){
+		strcpy(buf,"AUTO");
+	}else{
+		sprintf(buf,"%dM",freq[value]);
+	}
+	if(x_res==1920){
+		blt_clr(fb_base0,64+13*24,64,64+19*24,64+36);
+		LCDDisplayASCII8X16(64+13*24,64,RED,buf);
+	}else if(x_res==1280){
+		blt_clr(fb_base0,64+13*16,64,64+19*24,64+36);
+		LCDDisplayASCII8X16_720p(64+13*16,64,RED,buf);
+	}
+}
+void set_power(int value){
+
+        char *power[6] = {"1mW","10mW","50mW","100mW","200mW","500mW"};
+        if(x_res==1920){
+                blt_clr(fb_base0,64+13*24,64+36,64+19*24,64+36+36);
+                LCDDisplayASCII8X16(64+13*24,64+36,RED,power[value]);
+        }else if(x_res==1280){
+                blt_clr(fb_base0,64+13*16,64+36,64+19*16,64+36+36);
+                LCDDisplayASCII8X16_720p(64+13*16,64+36,RED,power[value]);
+        }
+}
+
+
+
+void set_color(int value){
+
+        char *color[6] = {"RED","BLUE","GREEN","YELLOW","BLACK","WHITE"};
+        if(x_res==1920){
+		blt_clr(fb_base0,64+13*24,64+36*2,64+19*24,64+36*3);
+                LCDDisplayASCII8X16(64+13*24,64+36*2,RED,color[value]);
+        }else if(x_res==1280){
+		blt_clr(fb_base0,64+13*16,64+36*2,64+19*24,64+36*3);
+                LCDDisplayASCII8X16_720p(64+13*16,64+36*2,RED,color[value]);
+        }
+}
+
+void set_poll(int value){
+
+        //char *color[6] = {"RED","BLUE","GREEN","YELLOW","BLACK","WHITE"};
+        if(x_res==1920){
+		blt_clr(fb_base0,64+13*24,64+36*3,64+19*24,64+36*4);
+		LCDDisplayASCII8X16(64+13*24,64+36*3,RED,value ? "-1" : "1");
+        }else if(x_res==1280){
+		blt_clr(fb_base0,64+13*16,64+36*3,64+19*24,64+36*4);
+		LCDDisplayASCII8X16_720p(64+13*16,64+36*3,RED,value ? "-1" : "1");
+	}
+}
+
+void set_pitch(int value){
+
+        //char *color[6] = {"RED","BLUE","GREEN","YELLOW","BLACK","WHITE"};
+        if(x_res==1920){
+		blt_clr(fb_base0,64+13*24,64+36*4,64+19*24,64+36*5);
+                LCDDisplayASCII8X16(64+13*24,64+36*4,RED,value ? "-1" : "1");
+        }else if(x_res==1280){
+		blt_clr(fb_base0,64+13*16,64+36*4,64+19*24,64+36*5);
+                LCDDisplayASCII8X16_720p(64+13*16,64+36*4,RED,value ? "-1" : "1");
+        }
+}
+
+void set_osd(int value){
+
+        //char *color[6] = {"RED","BLUE","GREEN","YELLOW","BLACK","WHITE"};
+        if(x_res==1920){
+                blt_clr(fb_base0,64+13*24,64+36*5,64+19*24,64+36*6);
+                LCDDisplayASCII8X16(64+13*24,64+36*5,RED,value ? "ON":"OFF");
+        }else if(x_res==1280){
+                blt_clr(fb_base0,64+13*16,64+36*5,64+19*24,64+36*6);
+                LCDDisplayASCII8X16_720p(64+13*16,64+36*5,RED,value ? "ON" : "OFF");
+        }
+}
+
+
+
+void set_save(int value){
+
+        //char *color[6] = {"RED","BLUE","GREEN","YELLOW","BLACK","WHITE"};
+        if(x_res==1920){
+                blt_clr(fb_base0,64+13*24,64+36*6,64+19*24,64+36*7);
+                LCDDisplayASCII8X16(64+13*24,64+36*6,RED,value ? "ON":"OFF");
+        }else if(x_res==1280){
+                blt_clr(fb_base0,64+13*16,64+36*6,64+19*24,64+36*7);
+                LCDDisplayASCII8X16_720p(64+13*16,64+36*6,RED,value ? "ON" : "OFF");
+        }
+}
+
+
+
+void save_param(){
+	char *freq[10] = {"AUTO","5180M","5200M","5220M","5240M","5745M","5765M","5785M","5805M","5825M"};
+	char *power[6] = {"1mW","10mW","50mW","100mW","200mW","500mW"};
+	char *color[6] = {"RED","BLUE","GREEN","YELLOW","BLACK","WHITE"};	
+	char *roll[2] = {"1","-1"};	
+	char *pitch[2] = {"1","-1"};	
+	char buf[2];
+	printf("saveing................\n");
+
+//	munmap(fb_base0,1920*1088*4);
+//	munmap(fb_base1,1920*1088*4);
+//	munmap(fb_ctrl,4096);
+
+	if(count_anjian6 % 2){
+		set_conf_string("wififreq",freq[count_anjian2%10]);
+		set_conf_string("txpower",power[count_anjian7%6]);
+		set_conf_string("color",color[count_anjian3%6]);
+		set_conf_string("invert_poll",roll[count_anjian4%2]);	
+        	set_conf_string("invert_pitch",pitch[count_anjian5%2]);
+        	set_conf_int("osd",count_osd%2);
+		save_confile("/data/decode.cfg");
+		buf[0] = count_anjian2%10;
+		buf[1] = count_anjian7%6;
+		sendto(socket_descriptor,buf,2,0,(struct sockaddr *)&address,sizeof(address));	
+	}
+}
+
+
+void render(int key_value){
+
+
+	if(key_value == 0x01){
+		blt_clr(fb_base0,20,64,60,64+36*7);
+		count_anjian1++;
+		if(count_anjian1 % ROW == 1){
+			Arrow(20,64,1);			
+		}
+
+		if(count_anjian1 % ROW == 2){
+			Arrow(20,64+36,1);
+		}
+
+		if(count_anjian1 % ROW == 3){
+			Arrow(20,64+36*2,1);
+                }
+		if(count_anjian1 % ROW == 4){
+                        Arrow(20,64+36*3,1);
+                }
+		if(count_anjian1 % ROW == 5){
+                        Arrow(20,64+36*4,1);
+                }
+		if(count_anjian1 % ROW == 6){
+                        Arrow(20,64+36*5,1);
+                }
+		if(count_anjian1 % ROW == 0){
+                        Arrow(20,64+36*6,1);
+                }
+
+	
+		
+
+	}else if(key_value == 0x02){
+		if(count_anjian1 % 7 == 1){
+			count_anjian2++;
+			set_freq(count_anjian2%10);			
+		}
+		if(count_anjian1 % 7 == 2 ){
+			count_anjian7++;
+			set_power(count_anjian7%6);
+		}
+
+		if(count_anjian1 % 7 == 3){
+			count_anjian3++;
+                        set_color(count_anjian3%6);
+                }
+		if(count_anjian1 % 7 == 4){
+                        count_anjian4++;
+                        set_poll(count_anjian4%2);
+                }
+		if(count_anjian1 % 7 == 5){
+                        count_anjian5++;
+                        set_pitch(count_anjian5%2);
+                }
+		if(count_anjian1 % 7 == 6){
+                        count_osd++;
+                        set_osd(count_osd%2);
+                }
+
+
+		if(count_anjian1 % 7 == 0){
+                        count_anjian6++;
+                        set_save(count_anjian6%2);
+                }
+
+	
+
+	}else if(key_value == 0x10){
+
+
+
+	}	
+
+}

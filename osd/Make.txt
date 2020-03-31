@@ -1,0 +1,2 @@
+arm-linux-gnueabihf-gcc -o osd_anjian main.c ascii16x24.c ascii24x36.c confile.c p2v.c render.c udp_util.c  -lrt -lpthrea
+arm-linux-gnueabihf-gcc -o oled main.c oled.c platform.c codec.c confile.c -pthread
